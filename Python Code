@@ -1,0 +1,67 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import confusion_matrix
+import xgboost as xgb
+import serial
+import time
+
+data = pd.read_csv('Dataset - Disease Prediction 3.csv')
+
+
+label_encoder = LabelEncoder()
+data['disease'] = label_encoder.fit_transform(data['disease'])
+
+X = data[['heart_rate', 'spO2', 'temperature']] 
+y = data['disease']  
+
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+xgb_model = xgb.XGBClassifier(eval_metric='mlogloss', random_state=42)
+xgb_model.fit(X_train, y_train)
+
+y_test_pred = xgb_model.predict(X_test)
+
+print("Confusion Matrix:")
+print(confusion_matrix(y_test, y_test_pred))
+
+
+duration= 20
+start_time = time.time()
+while time.time() - start_time < duration:
+
+    def get_arduino_input():
+        
+        ser = serial.Serial('COM4', 115200)  
+        time.sleep(2)  
+
+        
+        line = ser.readline().decode('utf-8').strip()  
+        ser.close() 
+
+        
+        values = line.split(',')
+        heart_rate = float(values[0])
+        spO2 = float(values[1])
+        temperature = float(values[2])
+
+        print(heart_rate,spO2,temperature)
+
+        return np.array([[heart_rate, spO2, temperature]])
+        
+        time.sleep(1)
+
+
+user_input = get_arduino_input()
+y_pred_prob = xgb_model.predict_proba(user_input)
+
+y_pred_class = np.argmax(y_pred_prob, axis=1)
+disease_classes = label_encoder.classes_
+
+predicted_disease = disease_classes[y_pred_class[0]]
+probabilities = dict(zip(disease_classes, y_pred_prob[0]))
+
+print(f"Predicted Disease: {predicted_disease}")
+print(f"Probabilities for each disease: {probabilities}")
