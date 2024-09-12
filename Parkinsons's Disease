@@ -1,0 +1,135 @@
+import sounddevice as sd
+import numpy as np
+import librosa
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import OneClassSVM
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.optimizers import Adam
+import time
+
+# Function to record audio using sounddevice
+def record_audio(duration=5, fs=22050):
+    print("Recording audio for {} seconds...".format(duration))
+    audio_data = sd.rec(int(duration * fs), samplerate=fs, channels=1)
+    sd.wait()  # Wait until the recording is finished
+    audio_data = audio_data.flatten()  # Flatten the array to 1D
+    print("Recording complete.")
+    return audio_data
+
+# Function to load and process an audio file
+def load_audio_file(file_path, sr=22050):
+    print(f"Loading and processing audio file from: {file_path}")
+    audio, sr = librosa.load(file_path, sr=sr)  # Load audio file
+    return audio
+
+# Function to extract MFCC features from the audio using librosa
+def extract_features(audio, sr=22050):
+    print("Extracting features from audio...")
+    mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)  # 13 MFCC coefficients
+    mfccs_mean = np.mean(mfccs.T, axis=0)  # Compute the mean of each MFCC coefficient
+    return mfccs_mean
+
+# Load and preprocess the dataset
+data_path = 'parkinsons_updrs.data'  # Replace with your dataset path
+data = pd.read_csv(data_path)
+
+# Extract features and standardize them
+def prepare_data():
+    X = data.drop(columns=['label']) if 'label' in data.columns else data  # Features
+    X = X.iloc[:, :13]  # Selecting only the first 13 columns to match MFCC features
+    X = X.values
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    return X_scaled, scaler
+
+# Train the One-Class SVM model
+def train_ocsvm(X_scaled):
+    ocsvm = OneClassSVM(kernel='rbf', gamma=0.001, nu=0.05)
+    ocsvm.fit(X_scaled)
+    return ocsvm
+
+# Build the autoencoder model with Adam optimizer
+def build_autoencoder(input_dim):
+    model = Sequential()
+    # Encoder
+    model.add(Dense(64, activation='relu', input_shape=(input_dim,)))
+    model.add(Dense(32, activation='relu'))
+    model.add(Dense(16, activation='relu'))
+    
+    # Decoder
+    model.add(Dense(32, activation='relu'))
+    model.add(Dense(64, activation='relu'))
+    model.add(Dense(input_dim, activation='sigmoid'))  # Sigmoid to get values between 0 and 1
+    
+    # Compile the model with Adam optimizer
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')  # Mean Squared Error loss for reconstruction
+    return model
+
+# Train the autoencoder
+def train_autoencoder(X_scaled):
+    input_dim = X_scaled.shape[1]
+    autoencoder = build_autoencoder(input_dim)
+    autoencoder.fit(X_scaled, X_scaled, epochs=50, batch_size=16, shuffle=True)
+    return autoencoder
+
+# Prepare data and models
+X_scaled, scaler = prepare_data()
+ocsvm = train_ocsvm(X_scaled)
+autoencoder = train_autoencoder(X_scaled)
+
+# Function to predict using One-Class SVM
+def predict_parkinsons_svm(audio):
+    features = extract_features(audio)
+    features_scaled = scaler.transform([features])
+    prediction = ocsvm.predict(features_scaled)
+    if prediction == 1:
+        print("The model predicts that the input voice is indicative of Parkinson's disease.")
+    else:
+        print("The model predicts that the input voice is healthy (anomalous).")
+
+# Function to predict using Autoencoder
+def predict_anomaly_autoencoder(audio):
+    features = extract_features(audio)
+    features_scaled = scaler.transform([features])
+    reconstruction = autoencoder.predict(features_scaled)
+    reconstruction_error = np.mean(np.square(features_scaled - reconstruction))
+    threshold = 0.05  # Adjust based on the dataset's error distribution
+    if reconstruction_error > threshold:
+        print("Anomaly detected: This voice input might indicate Parkinson's disease.")
+    else:
+        print("No anomaly detected: The voice input is likely healthy.")
+
+# Main function to select between real-time input or audio file upload
+def main():
+    while True:
+        print("\nChoose an option:")
+        print("1. Record real-time voice input")
+        print("2. Upload an audio file")
+        choice = input("Enter your choice (1 or 2): ").strip()
+
+        if choice == '1':
+            # Real-time voice input (One-Class SVM model)
+            print("\nSpeak now to predict if Parkinson's disease is present...")
+            duration = 5  # Record for 5 seconds
+            audio = record_audio(duration=duration)
+            predict_parkinsons_svm(audio)
+        elif choice == '2':
+            # Upload an audio file (Autoencoder model)
+            file_path = input("Enter the path of the audio file: ").strip()
+            try:
+                audio = load_audio_file(file_path)
+                predict_anomaly_autoencoder(audio)
+            except Exception as e:
+                print(f"Error loading the file: {e}")
+        else:
+            print("Invalid choice! Please enter 1 or 2.")
+
+        time.sleep(2)  # Delay before the next prediction
+        cont = input("Do you want to test again? (yes/no): ").strip().lower()
+        if cont != 'yes':
+            break
+
+if __name__ == "__main__":
+    main()
