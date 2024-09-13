@@ -1,0 +1,173 @@
+import serial
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from sklearn.metrics import roc_auc_score
+import time
+
+
+arduino_port = 'COM4'  
+baud_rate = 115200
+try:
+    ser = serial.Serial(arduino_port, baud_rate, timeout=1)
+    time.sleep(2)  
+    print("Connected to Arduino on port:", arduino_port)
+except Exception as e:
+    print(f"Failed to connect to Arduino: {e}")
+
+
+buffer_size = 1000
+data_buffer = np.zeros(buffer_size)  
+current_index = 0  
+
+def collect_data(duration=100):
+    global data_buffer, current_index
+    start_time = time.time()
+    while time.time() - start_time < duration:
+        if ser.in_waiting > 0:  
+            try:
+                line = ser.readline().decode('utf-8').strip() 
+                eeg_value = float(line)  
+                data_buffer[current_index] = eeg_value
+                current_index += 1
+                if current_index >= buffer_size:
+                    current_index = 0  
+            except Exception as e:
+                print("Error while reading:", e)
+                continue
+
+
+print("Collecting data for 100 seconds...")
+collect_data(duration=100)
+print("Data collection complete.")
+
+def read_from_arduino():
+    global data_buffer, current_index
+    if ser and ser.in_waiting > 0: 
+        try:
+            line = ser.readline().decode('utf-8').strip()  
+            eeg_value = float(line)  
+            data_buffer[current_index] = eeg_value
+            current_index += 1
+            if current_index >= buffer_size:
+                current_index = 0  
+            print(f"Data acquired: {eeg_value}")  
+        except ValueError as e:
+            print(f"ValueError while reading data: {e}")
+        except Exception as e:
+            print(f"Unexpected error while reading data: {e}")
+
+
+fig, ax1 = plt.subplots(figsize=(10, 8))
+fig.suptitle("Real-Time EEG Sensor Data")
+eeg_plot, = ax1.plot(np.arange(buffer_size), data_buffer, label="EEG") 
+
+
+ax1.set_xlim(0, buffer_size)
+ax1.set_ylim(-1000, 1000)  
+ax1.set_ylabel("EEG")
+ax1.set_xlabel("Samples")
+ax1.legend()
+
+
+def update_plot(frame):
+    read_from_arduino()  
+    eeg_plot.set_ydata(data_buffer) 
+    
+   
+    ax1.set_xlim(0, buffer_size)
+    ax1.set_ylim(np.min(data_buffer) - 10, np.max(data_buffer) + 10)
+    
+    return eeg_plot,
+
+
+ani = FuncAnimation(fig, update_plot, interval=100)  
+plt.show()
+
+
+print("Normalizing data...")
+min_val = np.min(data_buffer)
+max_val = np.max(data_buffer)
+
+
+if max_val - min_val != 0:
+    data_buffer = (data_buffer - min_val) / (max_val - min_val)
+    print("Data normalization complete.")
+else:
+    print("Data buffer contains constant values; skipping normalization.")
+
+
+def resnet_block(input_data, filters, kernel_size=3, stride=1):
+    x = layers.Conv1D(filters, kernel_size, strides=stride, padding="same")(input_data)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+    x = layers.Conv1D(filters, kernel_size, strides=1, padding="same")(x)
+    x = layers.BatchNormalization()(x)
+    
+   
+    if stride != 1:
+        input_data = layers.Conv1D(filters, kernel_size=1, strides=stride, padding="same")(input_data)
+    x = layers.Add()([x, input_data])
+    x = layers.ReLU()(x)
+    
+    return x
+
+
+def build_resnet(input_shape):
+    inputs = layers.Input(shape=input_shape)
+    
+    
+    x = layers.Conv1D(32, 7, strides=2, padding="same", kernel_regularizer=tf.keras.regularizers.l2(0.001))(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+    
+   
+    x = resnet_block(x, filters=32, stride=1)
+    x = resnet_block(x, filters=64, stride=2)
+    x = resnet_block(x, filters=128, stride=2)
+    
+   
+    x = layers.GlobalAveragePooling1D()(x)
+    outputs = layers.Dense(1, activation='sigmoid')(x)  
+    
+    model = models.Model(inputs, outputs)
+    return model
+
+
+input_shape = (buffer_size, 1)  
+
+
+model = build_resnet(input_shape)
+lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(initial_learning_rate=0.001, decay_steps=10000, decay_rate=0.9)
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule), 
+              loss='binary_crossentropy', 
+              metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
+print("ResNet model built and compiled.")
+
+
+data_buffer = np.random.rand(buffer_size, 1)  
+
+
+data_buffer = data_buffer.reshape(1, buffer_size, 1)
+
+
+callbacks = [
+    tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True),
+    tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=3)
+]
+
+
+y_train = np.array([0]) 
+model.fit(data_buffer, y_train, epochs=20, callbacks=callbacks)
+
+
+print("Running prediction...")
+prediction = model.predict(data_buffer)
+predicted_class = (prediction > 0.5).astype(int)
+print(f" Predicted Class (0 = Healthy, 1 = Disease): {predicted_class}")
+
+
+ser.close()
+print("Serial port closed.")
